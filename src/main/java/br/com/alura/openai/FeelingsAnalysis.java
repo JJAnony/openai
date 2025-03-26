@@ -1,6 +1,7 @@
 package br.com.alura.openai;
 
 import com.knuddels.jtokkit.api.ModelType;
+import com.theokanning.openai.OpenAiHttpException;
 import com.theokanning.openai.completion.chat.ChatCompletionRequest;
 import com.theokanning.openai.completion.chat.ChatMessage;
 import com.theokanning.openai.completion.chat.ChatMessageRole;
@@ -16,6 +17,29 @@ import java.util.stream.Collectors;
 public class FeelingsAnalysis {
 
     public static void main(String[] args) {
+        try {
+
+            var dirReviews = Path.of("src/main/resources/reviews");
+            var reviewsFiles = Files.walk(dirReviews, 1)
+                    .filter(path -> path.toString().endsWith(".txt"))
+                    .collect(Collectors.toList());
+
+            for (Path file : reviewsFiles) {
+                System.out.println("Iniciando analise do produto: " + file.getFileName());
+
+                var response = sendRequest(file);
+                saveAnalysis(file.getFileName().toString(), response);
+
+                System.out.println("Analise Finalizada!");
+            }
+        } catch (Exception e) {
+            throw new RuntimeException(e);
+        }
+    }
+
+    private static String sendRequest(Path file) throws InterruptedException {
+        var key = System.getenv("OPENAI_API_KEY");
+        var service = new OpenAiService(key, Duration.ofSeconds(60));
 
         var systemPrompt = """
                 Você é um analisador de sentimentos de avaliações de produtos.
@@ -30,39 +54,43 @@ public class FeelingsAnalysis {
                 Pontos fracos: [3 bullets points]
                 """;
 
-        try {
+        var userPrompt = loadFile(file);
 
-            var dirReviews = Path.of("src/main/resources/reviews");
-            var reviewsFiles = Files.walk(dirReviews, 1)
-                    .filter(path -> path.toString().endsWith(".txt"))
-                    .collect(Collectors.toList());
+        var request = ChatCompletionRequest
+                .builder()
+                .model(ModelType.GPT_4.getName())
+                .messages(Arrays.asList(
+                        new ChatMessage(ChatMessageRole.SYSTEM.value(), systemPrompt),
+                        new ChatMessage(ChatMessageRole.USER.value(), userPrompt)))
+                .build();
 
-            for (Path file : reviewsFiles) {
-                System.out.println("Iniciando analise do produto: " + file.getFileName());
-                var userPrompt = loadFile(file);
-
-                var request = ChatCompletionRequest
-                        .builder()
-                        .model(ModelType.GPT_4.getName())
-                        .messages(Arrays.asList(
-                                new ChatMessage(ChatMessageRole.SYSTEM.value(), systemPrompt),
-                                new ChatMessage(ChatMessageRole.USER.value(), userPrompt)))
-                        .build();
-
-                var key = System.getenv("OPENAI_API_KEY");
-                var service = new OpenAiService(key, Duration.ofSeconds(60));
-
-                var response = service
+        var attemptTime = 1000 * 5;
+        var attempt = 0;
+        while (attempt++ != 3) {
+            try {
+                return service
                         .createChatCompletion(request)
                         .getChoices().get(0).getMessage().getContent();
+            } catch (OpenAiHttpException ex) {
+                switch (ex.statusCode) {
+                    case 401 -> throw new RuntimeException("Erro com a chave da API!", ex);
+                    case 429 -> {
+                        System.out.println("RateLimit atingido! nova tentativa em instantes");
+                        Thread.sleep(attemptTime);
+                    }
+                    case 500, 503 -> {
+                        System.out.println("API fora do ar! nova tentativa em instantes");
+                        Thread.sleep(attemptTime);
+                    }
 
-                saveAnalysis(file.getFileName().toString(), response);
-                System.out.println("Analise Finalizada!");
+                }
+
             }
-        } catch (Exception e) {
-            throw new RuntimeException(e);
         }
+
+        throw new RuntimeException("API fora do ar! Tentativas finalizadas sem sucesso!");
     }
+
 
     private static String loadFile(Path path) {
         try {
